@@ -25,6 +25,7 @@ except NameError:
 
 
 BASE_ADDR = 0xFFFF0000F8800000
+FILE_SIZE = 0
 FUNC_TABLE_CATEGORY = CategoryPath("/pixel_loader")
 FUNC_TABLE_ENTRY_TYPE = None
 PROLOGUE_PATTERNS = (
@@ -150,14 +151,10 @@ def looks_like_pixel_abl():
 
     values = [byte_value(item) for item in header]
     for pattern in ABL_PATTERNS:
-        matched = False
         for offset in range(0, max(len(values) - len(pattern) + 1, 0)):
             if tuple(values[offset : offset + len(pattern)]) == pattern:
-                matched = True
-                break
-        if not matched:
-            return False
-    return True
+                return True
+    return False
 
 
 def find_func_table():
@@ -306,6 +303,12 @@ def has_expected_image_base():
 
 
 def main():
+    global FILE_SIZE
+    if currentProgram is None:
+        log("open a program before running this script")
+        return
+
+    FILE_SIZE = get_program_size()
     signature_matches = looks_like_pixel_abl()
     if not signature_matches:
         log("warning: the current binary does not match the expected Pixel ABL signature")
@@ -339,6 +342,4 @@ def main():
     created = find_code_by_prologue(0, FILE_SIZE)
     log("identified %d possible function entry points by prologue scan" % created)
 
-
-FILE_SIZE = get_program_size()
 main()

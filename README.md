@@ -30,7 +30,7 @@ You can also use any personal script directory configured in Ghidra's Script Man
 
 2. Import the extracted `abl` binary into Ghidra as a raw binary.
 3. Select the AArch64 little-endian language during import and set the image base to `0xFFFF0000F8800000`.
-4. Run `PixelBootloader.py` from Ghidra's Script Manager.
+4. Run `PixelBootloader.py` from Ghidra's Script Manager before relying on the initial auto-analysis results, or rerun auto-analysis after the script completes.
 
 The script will:
 
