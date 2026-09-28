@@ -194,7 +194,10 @@ def read_c_string(offset):
         value = read_le(offset, 1)
         if value is None or value == 0:
             break
-        chars.append(chr(value))
+        if 0x20 <= value <= 0x7E:
+            chars.append(chr(value))
+        else:
+            chars.append("_")
         offset += 1
 
     return "".join(chars)
@@ -307,7 +310,7 @@ def main():
         create_label_safe(toAddr(end_of_code), "pixel_code_end")
         resolved = resolve_func_table(func_table_offset)
         log("resolved %d functions from the function table" % resolved)
-        created = find_code_by_prologue(0, end_of_code - BASE_ADDR)
+        created = find_code_by_prologue(0, FILE_SIZE)
         log("identified %d additional function entry points by prologue scan" % created)
         return
 
