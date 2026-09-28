@@ -1,6 +1,6 @@
 ## pixel_loader
 
-This is an IDA Pro loader, that can help improve the process of reversing the ABL stage of the Pixel phone bootloader.
+This project is now a Ghidra analysis script for Google Pixel ABL bootloader binaries.
 
 Tested on bootloaders from:
 
@@ -8,49 +8,37 @@ Tested on bootloaders from:
   * Pixel 7 / 7 Pro
   * Pixel 8 / 8 Pro
 
-NOTE: currently the loader doesn't support some of the changes added to the ABL since June 5th 2024, It'll be fixed later.
+NOTE: the script still does not cover some of the newer ABL changes introduced after June 5th 2024.
 
 ### Installation
 
-Simply copy the script to the following path:
+Copy the script to a Ghidra script directory, for example:
+
 ```
-$IDAPRO/loaders/
+$GHIDRA_HOME/Ghidra/Features/Base/ghidra_scripts/
 ```
 
-Where $IDAPRO is the folder/directory where the ida executable is located.
-For example on Windows that would be something like ```C:\Program Files\IDA Pro 8.3\loaders\```
+You can also use any personal script directory configured in Ghidra's Script Manager.
 
-the bootloader's content can be extracted using [Jonthan Levin's tool ImjTool](https://newandroidbook.com/tools/imjtool.html)
-For example:
-```
-./imjtool.ELF64 bootloader-oriole-slider-1.3-10674934.img extract
-```
-Inside the "extracted" folder you can find the binary blob for "abl" boot stage.
-Afterwards, whenever a pixel ABL is loaded into ida pro, the loader module will show up in the options, simply click ok.
+### Usage
 
-![First time](./screenshot/idapro83-abl-firsttime.PNG)
+1. Extract the bootloader contents with [Jonathan Levin's ImjTool](https://newandroidbook.com/tools/imjtool.html):
 
-So, far the loader will help with:
-  - Finding the function table (containing offests of where the functions .
-  are, their size and an offset to their name as null-terminiated string).
-  - Creating some C-style structs and applying.
-  - Marking interesting areas in the bootloader binary.
+   ```
+   ./imjtool.ELF64 bootloader-oriole-slider-1.3-10674934.img extract
+   ```
 
-It will be updated later to include improved function types/identifying embedded objects...etc to help in reverse engineering and research.
+2. Import the extracted `abl` binary into Ghidra as a raw binary.
+3. Select the AArch64 little-endian language during import.
+4. Run `PixelBootloader.py` from Ghidra's Script Manager.
 
-### Example
+The script will:
 
-Before the loader IDA pro tries to auto-guess where the valid instructions are (This image is from IDA Pro 8.3) and normally its invalid
-![Example 1](./screenshot/idapro83-abl.PNG)
+  * Rebase the program to the Pixel ABL runtime base address.
+  * Locate and label the function table when present.
+  * Create and name functions from the loader metadata.
+  * Fall back to prologue scanning when the function table is missing.
 
-After the loader has been installed, this is the results:
+### Notes
 
-![Example 2](./screenshot/idapro83-abl2.PNG)
-
-
-![Example 1](./screenshot/idapro83-abl3.PNG)
-
-
-PS: the labeling/translation of operands in MRS/MSR instructions is done by this plugin:
-
-https://github.com/NeatMonster/AMIE
+This is a post-import Ghidra script rather than a native Ghidra loader extension, which keeps the project simple and avoids a separate Java extension build.

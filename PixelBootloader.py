@@ -1,304 +1,333 @@
-#!/bin/python3
-#	PixelBootloader.py:
-# 		A loader module for IDA Pro that can handle the abl.bin binary 
-#		for Google Pixel Phones, tested against abl binaries from:
-#		-	Pixel 6 / 6a / 6 pro
-#		-	Pixel 7 / 7 pro
-#		-       Pixel 8
-#
-#		The loader was tested in IDA Pro version 7.6 - 8.3
-#   Author:
-#       Abdullah (https://github.com/0xAbby) 20-Mar-2023 - Initial Implementation
+#!/usr/bin/env python
+# Converts a raw Pixel ABL import into a more usable Ghidra analysis session.
+# The script rebases the program, finds the Pixel function table when present,
+# applies function names, and falls back to prologue scanning otherwise.
 
-import idc
-import idaapi
-import ida_ida
-import ida_entry
-import ida_segment
-import ida_name
-import ida_bytes
-import ida_ua
-import ida_typeinf
-import os
-import struct
-from time import sleep
+#@category Pixel
 
-# Read function table and set function names.
-def resolve_func_table(offset):
-	'''functions table (each entry is 16 bytes)
-		 Function offset:  64bit
-		 function size:    32bit
-		 func name offset: 32bit
-	'''
-	size_offset = ida_bytes.get_word(offset - 0xC)
-	print("# PixelAblLoader: size of function table: \t", hex(size_offset))
-	print("# PixelAblLoader: Function table start:  \t", hex(offset))
-	
-	address_table_start = offset
-	address_table_end = offset + (size_offset * 16)
-	
-	# end of function address table followed by a table for function names
-	print("# PixelAblLoader: Functions table ends: \t", hex(address_table_end))
+import re
 
-	# preparing to set function table struct type.
-	#ida_ida.inf_set_cc_cm(ida_typeinf.CM_N64)   # compiler pointer size
-	_type = idc.parse_decl("func_table_entry", 0)
-	
-	# For each function in the table, get its offset,
-	# Tell IDA to analyze/make it code, then set func name.
+import jarray
+
+from ghidra.program.model.data import (
+    CategoryPath,
+    DataTypeConflictHandler,
+    DWordDataType,
+    Pointer64DataType,
+    StructureDataType,
+)
+from ghidra.program.model.symbol import SourceType
 
 
-	output_csv = open("func_csv", "w")
-	while address_table_start < address_table_end:
-    	# get function offset
-		func_offset = ida_bytes.get_bytes(address_table_start, 8)
-
-    	# read function address
-		func_offset_bytes = int.from_bytes(func_offset, "little")
-
-    	# read offset value of  "function name"
-		string_offset = ida_bytes.get_bytes(address_table_start+12, 4)
-
-    	# find function name (names offset + names table)
-		func_name_addr = int.from_bytes(string_offset, "little") + address_table_end
-		idc.create_strlit(func_name_addr, idc.BADADDR)
-		func_name_len = ida_bytes.get_max_strlit_length(func_name_addr, idc.STRTYPE_C, ida_bytes.ALOPT_IGNHEADS)
-		funct_str = ida_bytes.get_strlit_contents(func_name_addr, func_name_len, idc.STRTYPE_C).decode()
-		csv_entry = "" + '\"' + funct_str + '\", \"' + hex(func_name_addr) + "\"\n"
-		output_csv.write(csv_entry)
-        
-		#if funct_str == "pixel_loader_entry":
-        #	ida_entry.add_entry(func_offset_bytes, func_offset_bytes, funct_str, True, 0)
-
-        # analyze/set function to code, set name, mark offset / value in table.
-		ida_ua.create_insn(func_offset_bytes)
-		ida_name.set_name(func_offset_bytes, funct_str, idaapi.SN_NOWARN | idaapi.SN_NOCHECK | ida_name.SN_FORCE)
-		idc.op_plain_offset(address_table_start, 0, 0)
-		ida_bytes.create_dword(address_table_start+8, 4) 
-		ida_bytes.create_dword(address_table_start+12, 4) 
-        
-        # Set data structure for each function entry
-		idc.apply_type(address_table_start, _type, 0)
-        
-        # next entry in functions table (entry is 16 byte long)
-		address_table_start += 16
-	output_csv.close()
-
-  
-	
-
-def get_file_size(blob):
-	blob.seek(0, os.SEEK_END)
-	return blob.tell()
-
-# to supress a warning message.
-def move_segm(a,b,c,d):
-	pass
- 
-# Determine whether the blob is Pixel ABL file or not
-def accept_file(blob, filename):
-	buffer = blob.read(0x70)
-	# find instruction bytes for these operations int 
-	# the first 0x70 bytes (this needs to be improved somehow in the future)
-	# 5C 42 38 D5    MRS   X28, CurrentEL
-	# 09 10 38 D5    MRS   X9, SCTLR_EL1
-	# 09 10 18 D5    MSR   SCTLR_EL1, X9
-	mrs_bytes = [b'\xD5\x38\x42\x5C', b'\xD5\x38\x10\x09', b'\xD5\x18\x10\x09' ]
-	
-	for bytes in mrs_bytes:
-		if not buffer.find(bytes):
-			return 0
-			
-	
-	return {"format": "Pixel bootloader (ABL)", 
-			"processor": "arm", 
-			"options":1 | idaapi.ACCEPT_FIRST}
-
-def create_segment(start, end, bitness, name, segType):
-	seg = idaapi.segment_t()
-	seg.start_ea = start
-	seg.end_ea =  end
-	if segType == "CODE":
-		seg.perm = idaapi.SEGPERM_READ | idaapi.SEGPERM_EXEC  | idaapi.SEGPERM_WRITE
-	else:
-		seg.perm = idaapi.SEGPERM_READ | idaapi.SEGPERM_WRITE
-	seg.is_64bit = True
-#	seg.align = 3
-	seg.bitness = bitness
-	
-	idaapi.add_segm_ex(seg, name, segType, 0)
+BASE_ADDR = 0xFFFF0000F8800000
+FUNC_TABLE_CATEGORY = CategoryPath("/pixel_loader")
+PROLOGUE_PATTERNS = (
+    (0xFD, 0x7B, 0x01, None),
+    (0xFD, 0x7B, 0xB8, None),
+    (0xFD, 0x7B, 0xB9, None),
+    (0xFD, 0x7B, 0xBB, None),
+    (0xFD, 0x7B, 0xBA, None),
+    (0xFD, 0x7B, 0xBE, None),
+    (0xFD, 0x7B, 0xBC, None),
+    (0xFD, 0x7B, 0xBD, None),
+    (0xFD, 0x7B, 0xBF, None),
+    (0xFF, 0xC3, 0x02, None),
+    (0xFF, 0xC3, 0x00, None),
+    (0xFF, 0x03, 0x03, None),
+    (0xFF, 0x03, 0x01, None),
+    (0xFF, 0x43, 0x01, None),
+    (0xFF, 0x83, 0x02, None),
+    (0xFF, 0x83, 0x01, None),
+)
+ABL_PATTERNS = (
+    (0xD5, 0x38, 0x42, 0x5C),
+    (0xD5, 0x38, 0x10, 0x09),
+    (0xD5, 0x18, 0x10, 0x09),
+)
 
 
+def log(message):
+    println("[pixel_loader] " + message)
 
-# given a start/end address, search for 'bytes_str'
-def search_bytes(start_ea, end_ea, bytes_str):
 
-	mypattern = idaapi.compiled_binpat_vec_t()
-	
-	#print("# PixelAblLoader: search start: \t", hex(start_ea))
-	#print("# PixelAblLoader: search end: \t", hex(end_ea))
+def byte_value(value):
+    if isinstance(value, INTEGER_TYPES):
+        return value & 0xFF
+    return ord(value)
 
-	str_pattern = idaapi.parse_binpat_str(mypattern, start_ea, bytes_str, 16, 0)
-	if str_pattern is None:
-		return False
 
-	offset_found = idaapi.bin_search(start_ea, end_ea, mypattern, idaapi.BIN_SEARCH_CASE)
-   
-	if offset_found == idaapi.BADADDR:
-		print("# PixelAblLoader: search failed")
-		return False
+def get_program_size():
+    memory = currentProgram.getMemory()
+    return int(memory.getMaxAddress().subtract(memory.getMinAddress()) + 1)
 
-	return offset_found
- 
-# search for and return offset of function table, and offset where code segment ends
-def find_func_table(filesize_):
-	data_search_offset = filesize_ - int(filesize_ * 0.2) 
-	func_table_offset = search_bytes(data_search_offset, filesize_, "FFFF0000F8800000")
 
-	if func_table_offset:
-		# reading size of functions table 
-		func_table_size = int.from_bytes(ida_bytes.get_bytes(func_table_offset - 0xC, 4) , "little")
-		
-		# calculating offset of table end 
-		func_table_end = func_table_offset + (func_table_size * 16)
-		
-		# read address where code segment ends
-		end_of_code_segment = int.from_bytes(ida_bytes.get_bytes(func_table_end - 0x10, 8) , "little")
-		
-		print("# PixelAblLoader: Functions table at: \t", hex(func_table_offset))
-		print("# PixelAblLoader: offset of end of code: \t", hex(end_of_code_segment))
-		
-		return func_table_offset, end_of_code_segment
-	else:
-		print('''# PixelAblLoader: search for functions table offset failed,\
-		probably not valid ABL, or newer unsupported version''')
-		return False, False
+def get_bytes(offset, size):
+    if offset < 0 or size < 0 or offset + size > FILE_SIZE:
+        return None
+    data = jarray.zeros(size, "b")
+    currentProgram.getMemory().getBytes(toAddr(BASE_ADDR + offset), data)
+    return data
+
+
+def read_le(offset, size):
+    data = get_bytes(offset, size)
+    if data is None:
+        return None
+    value = 0
+    for index in range(size):
+        value |= byte_value(data[index]) << (index * 8)
+    return value
+
+
+def read_be(offset, size):
+    data = get_bytes(offset, size)
+    if data is None:
+        return None
+    value = 0
+    for index in range(size):
+        value = (value << 8) | byte_value(data[index])
+    return value
+
+
+def sanitize_name(name, fallback_offset):
+    cleaned = re.sub(r"[^0-9A-Za-z_]", "_", name or "")
+    cleaned = cleaned.strip("_")
+    if not cleaned:
+        cleaned = "sub_%X" % fallback_offset
+    if cleaned[0].isdigit():
+        cleaned = "_" + cleaned
+    return cleaned
+
+
+def create_label_safe(address, name):
+    try:
+        createLabel(address, name, True)
+    except:
+        pass
+
+
+def create_function_safe(address, name):
+    if not currentProgram.getMemory().contains(address):
+        return False
+
+    if not name:
+        name = "sub_%X" % address.getOffset()
+
+    disassemble(address)
+    function = getFunctionAt(address)
+    if function is None:
+        try:
+            function = createFunction(address, name)
+        except:
+            function = getFunctionAt(address)
+
+    if function is not None:
+        try:
+            function.setName(name, SourceType.IMPORTED)
+        except:
+            create_label_safe(address, name)
+        return True
+
+    create_label_safe(address, name)
+    return False
 
 
 def create_structs():
-	def_structs = {
-	"""struct fastboot_table_entry { 
-		unsigned __int64 *command_name;  
-		unsigned __int64 unk1;  
-		unsigned __int64 unk2;  
-		void *func_pointer; 
-		};
-		""",
-	""" struct fastbootvar_table_entry {
-		  unsigned __int64 *command_name;
-		  unsigned __int64 unk;
-		  void 	  *command_pointr;
-		};
-	""",
-	"""struct func_table_entry {
-		unsigned __int64 *func_pointer;
-		unsigned __int32 func_size;
-		unsigned __int32 name_offset;
-		};
-		"""}
+    manager = currentProgram.getDataTypeManager()
 
-	print("# PixelAblLoader: creating C-style struct defintions.")
-	for struct in def_structs:
-		ida_typeinf.idc_parse_types(struct, 0)
-
-def find_sig(sig, ea_start, ea_end):
-
-    while ea_start != idaapi.BADADDR:
-        
-        ea_start = idaapi.find_binary(ea_start, ea_end, sig, 16, idaapi.SEARCH_DOWN)
-        insn = idaapi.insn_t()
-        if ea_start != idaapi.BADADDR:
-            if idaapi.decode_insn(insn, ea_start):
-                if (insn.itype in [idaapi.ARM_stp, idaapi.ARM_mov, idaapi.ARM_sub]):
-                    ida_ua.create_insn(ea_start)
-                    idaapi.add_func(ea_start, idaapi.BADADDR)
-            ea_start += 4
-
-def find_code_by_prologue(ea_start, ea_end):
-    prologue = {"fd 7b 01 ?",
-                "fd 7b b8 ?",
-                "fd 7b b9 ?",
-                "fd 7b bb ?",
-                "fd 7b ba ?",
-                "fd 7b be ?",
-                "fd 7b bc ?",
-                "fd 7b bd ?",
-                "fd 7b bf ?",
-                "ff c3 02 ?",
-                "ff c3 00 ?",
-                "ff 03 03 ?",
-                "ff 03 01 ?",
-                "ff 43 01 ?",
-                "ff 83 02 ?",
-                "ff 83 01 ?" }
+    func_entry = StructureDataType(FUNC_TABLE_CATEGORY, "func_table_entry", 0)
+    func_entry.add(Pointer64DataType.dataType, 8, "func_pointer", None)
+    func_entry.add(DWordDataType.dataType, 4, "func_size", None)
+    func_entry.add(DWordDataType.dataType, 4, "name_offset", None)
+    manager.addDataType(func_entry, DataTypeConflictHandler.REPLACE_HANDLER)
 
 
-    for sig in prologue:
-        find_sig(sig, ea_start, ea_end)
+def looks_like_pixel_abl():
+    header = get_bytes(0, min(FILE_SIZE, 0x70))
+    if header is None:
+        return False
 
-def find_possible_code_end(ea, maxea):
-    sig = "00 " * 0x230
-    while ea != idaapi.BADADDR:
-        ea = idaapi.find_binary(ea, maxea, sig, 16, idaapi.SEARCH_DOWN)
-        if ea != idaapi.BADADDR:
-            #print("Found at ", hex(ea))
-            return ea
-    return 0
+    values = [byte_value(item) for item in header]
+    for pattern in ABL_PATTERNS:
+        matched = False
+        for offset in range(0, max(len(values) - len(pattern) + 1, 0)):
+            if tuple(values[offset : offset + len(pattern)]) == pattern:
+                matched = True
+                break
+        if not matched:
+            return False
+    return True
 
-def resolve_fastboot_table():
-	pass
 
-# main loader function
-def load_file(binaryBlob, neflags, format):
-	base_addr = 0xFFFF0000F8800000
-	
-	# set processor as ARM (little endian) / 64 bit mode
-	idaapi.set_processor_type('arm', idaapi.SETPROC_LOADER)
-	ida_ida.inf_set_64bit(True)
-	
-	filesize_ = get_file_size(binaryBlob)
-	create_segment(0, filesize_, 2, "BLOB", "DATA")
-	binaryBlob.seek(0)
-	binaryBlob.file2base(0, 0, filesize_, False)
-    
-	
-	# find function table / and end of code / offset where code segment ends 
-	func_table_offset, end_of_code_segment = find_func_table(filesize_) 
-	
-	if not func_table_offset:
-		print("# PixelAblLoader: failed, existing")
-		print("# continuing without function table")
-        
-		print("# Searching for end of CODE section")
-		possible_code_end = find_possible_code_end( int(filesize_*0.4), int(filesize_*0.57))
-        
-		if possible_code_end != 0:
-			create_segment(0, (possible_code_end), 2, "ABL_CODE", "CODE")
-			create_segment((possible_code_end), filesize_, 2, "ABL_DATA", "DATA")
-			ida_segment.rebase_program(base_addr, 0 )
-		else:
-			print("# No end of CODE section, treat segment as code")
-			create_segment(0, filesize_, 2, "ABL", "CODE")
-			ida_segment.rebase_program(base_addr, 0)
-        
-		ida_ua.create_insn(base_addr)
-		idaapi.add_func(base_addr, idaapi.BADADDR)    
-		find_code_by_prologue(base_addr, base_addr+filesize_)
+def find_func_table():
+    search_start = FILE_SIZE - int(FILE_SIZE * 0.2)
+    if search_start < 0x10:
+        search_start = 0x10
 
-	elif func_table_offset:
-		# adjust code and data segments / update base address
-        
-		create_segment(0, (end_of_code_segment - base_addr), 2, "ABL_CODE", "CODE")
-		create_segment((end_of_code_segment - base_addr), filesize_, 2, "ABL_DATA", "DATA")
-		ida_segment.rebase_program(base_addr, 0 )	
-        
-		# create releavant data structures from C-style definitions
-		create_structs()
-        
-		# set function' names / and tell ida pro to make each function into code 
-		resolve_func_table(func_table_offset + base_addr)
-        
-		# find and set fastboot commands and var table structs
-		resolve_fastboot_table()
-		
-	return 1
+    for offset in range(search_start, FILE_SIZE - 0x10, 4):
+        monitor.checkCancelled()
+
+        entry_value_le = read_le(offset, 8)
+        entry_value_be = read_be(offset, 8)
+        if entry_value_le != BASE_ADDR and entry_value_be != BASE_ADDR:
+            continue
+
+        table_size = read_le(offset - 0xC, 4)
+        if table_size is None or table_size <= 0 or table_size > 0x4000:
+            continue
+
+        table_end = offset + (table_size * 16)
+        if table_end <= offset or table_end > FILE_SIZE:
+            continue
+
+        end_of_code = read_le(table_end - 0x10, 8)
+        if end_of_code is None:
+            continue
+        if BASE_ADDR <= end_of_code <= BASE_ADDR + FILE_SIZE:
+            return offset, end_of_code
+
+    return None, None
+
+
+def read_c_string(offset):
+    if offset < 0 or offset >= FILE_SIZE:
+        return None
+
+    chars = []
+    while offset < FILE_SIZE:
+        value = read_le(offset, 1)
+        if value is None or value == 0:
+            break
+        chars.append(chr(value))
+        offset += 1
+
+    try:
+        return "".join(chars)
+    except:
+        return None
+
+
+def resolve_func_table(func_table_offset):
+    table_size = read_le(func_table_offset - 0xC, 4)
+    if table_size is None:
+        return 0
+
+    address_table_end = func_table_offset + (table_size * 16)
+    create_label_safe(toAddr(BASE_ADDR + func_table_offset), "pixel_func_table")
+    create_label_safe(toAddr(BASE_ADDR + address_table_end), "pixel_func_names")
+
+    resolved = 0
+    for entry_index, entry_offset in enumerate(range(func_table_offset, address_table_end, 16)):
+        monitor.checkCancelled()
+
+        func_offset = read_le(entry_offset, 8)
+        string_offset = read_le(entry_offset + 12, 4)
+        if func_offset is None or string_offset is None:
+            continue
+        if func_offset < BASE_ADDR or func_offset >= BASE_ADDR + FILE_SIZE:
+            continue
+
+        func_name = read_c_string(address_table_end + string_offset)
+        if not func_name:
+            func_name = "sub_%X" % func_offset
+
+        safe_name = sanitize_name(func_name, func_offset)
+        entry_addr = toAddr(BASE_ADDR + entry_offset)
+        create_label_safe(entry_addr, "func_table_entry_%04d" % entry_index)
+        if create_function_safe(toAddr(func_offset), safe_name):
+            resolved += 1
+
+    return resolved
+
+
+def find_possible_code_end():
+    zero_window = 0x230
+    start = int(FILE_SIZE * 0.4)
+    end = int(FILE_SIZE * 0.57)
+    if end <= start or zero_window <= 0:
+        return None
+
+    block = get_bytes(start, end - start)
+    if block is None:
+        return None
+
+    values = [byte_value(item) for item in block]
+    for index in range(0, len(values) - zero_window + 1, 4):
+        monitor.checkCancelled()
+        if all(value == 0 for value in values[index : index + zero_window]):
+            return start + index
+    return None
+
+
+def matches_prologue(values, offset, pattern):
+    for index, expected in enumerate(pattern):
+        if expected is None:
+            continue
+        if values[offset + index] != expected:
+            return False
+    return True
+
+
+def find_code_by_prologue(start_offset, end_offset):
+    span = end_offset - start_offset
+    if span <= 0:
+        return 0
+
+    block = get_bytes(start_offset, span)
+    if block is None:
+        return 0
+
+    values = [byte_value(item) for item in block]
+    found = 0
+    for offset in range(0, len(values) - 4, 4):
+        monitor.checkCancelled()
+        for pattern in PROLOGUE_PATTERNS:
+            if matches_prologue(values, offset, pattern):
+                if create_function_safe(
+                    toAddr(BASE_ADDR + start_offset + offset),
+                    "sub_%X" % (BASE_ADDR + start_offset + offset),
+                ):
+                    found += 1
+                break
+    return found
+
+
+def ensure_image_base():
+    if currentProgram.getImageBase().getOffset() == BASE_ADDR:
+        return
+
+    log("Rebasing program to 0x%X" % BASE_ADDR)
+    currentProgram.setImageBase(toAddr(BASE_ADDR), True)
+
+
+def main():
+    ensure_image_base()
+    create_structs()
+
+    if not looks_like_pixel_abl():
+        log("warning: the current binary does not match the expected Pixel ABL signature")
+
+    func_table_offset, end_of_code = find_func_table()
+    if func_table_offset is not None:
+        log("function table at 0x%X" % (BASE_ADDR + func_table_offset))
+        create_label_safe(toAddr(end_of_code), "pixel_code_end")
+        create_label_safe(toAddr(end_of_code), "pixel_data_start")
+        resolved = resolve_func_table(func_table_offset)
+        log("resolved %d functions from the function table" % resolved)
+        return
+
+    log("function table not found; falling back to code boundary and prologue detection")
+    possible_code_end = find_possible_code_end()
+    if possible_code_end is not None:
+        create_label_safe(toAddr(BASE_ADDR + possible_code_end), "pixel_code_end")
+
+    created = find_code_by_prologue(0, FILE_SIZE)
+    log("identified %d possible function entry points by prologue scan" % created)
+
+
+FILE_SIZE = get_program_size()
+main()
+try:
+    INTEGER_TYPES = (int, long)
+except NameError:
+    INTEGER_TYPES = (int,)
