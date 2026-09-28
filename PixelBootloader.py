@@ -18,6 +18,11 @@ from ghidra.program.model.data import (
 )
 from ghidra.program.model.symbol import SourceType
 
+try:
+    INTEGER_TYPES = (int, long)
+except NameError:
+    INTEGER_TYPES = (int,)
+
 
 BASE_ADDR = 0xFFFF0000F8800000
 FUNC_TABLE_CATEGORY = CategoryPath("/pixel_loader")
@@ -163,6 +168,7 @@ def find_func_table():
     search_start = FILE_SIZE - int(FILE_SIZE * 0.2)
     if search_start < 0x10:
         search_start = 0x10
+    search_start -= search_start % 4
 
     for offset in range(search_start, FILE_SIZE - 0x10, 4):
         monitor.checkCancelled()
@@ -201,10 +207,7 @@ def read_c_string(offset):
         chars.append(chr(value))
         offset += 1
 
-    try:
-        return "".join(chars)
-    except:
-        return None
+    return "".join(chars)
 
 
 def resolve_func_table(func_table_offset):
@@ -279,7 +282,7 @@ def find_code_by_prologue(start_offset, end_offset):
 
     values = [byte_value(item) for item in block]
     found = 0
-    for offset in range(0, len(values) - 4, 4):
+    for offset in range(0, len(values) - 3, 4):
         monitor.checkCancelled()
         for pattern in PROLOGUE_PATTERNS:
             if matches_prologue(values, offset, pattern):
@@ -327,7 +330,3 @@ def main():
 
 FILE_SIZE = get_program_size()
 main()
-try:
-    INTEGER_TYPES = (int, long)
-except NameError:
-    INTEGER_TYPES = (int,)
