@@ -70,7 +70,8 @@ def get_bytes(offset, size):
     if offset < 0 or size < 0 or offset + size > FILE_SIZE:
         return None
     data = jarray.zeros(size, "b")
-    currentProgram.getMemory().getBytes(toAddr(BASE_ADDR + offset), data)
+    image_base = currentProgram.getImageBase().getOffset()
+    currentProgram.getMemory().getBytes(toAddr(image_base + offset), data)
     return data
 
 
@@ -293,11 +294,12 @@ def ensure_image_base():
 
 
 def main():
-    ensure_image_base()
-    create_structs()
-
     if not looks_like_pixel_abl():
         log("warning: the current binary does not match the expected Pixel ABL signature")
+        return
+
+    ensure_image_base()
+    create_structs()
 
     func_table_offset, end_of_code = find_func_table()
     if func_table_offset is not None:
