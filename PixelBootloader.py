@@ -26,6 +26,7 @@ except NameError:
 
 BASE_ADDR = 0xFFFF0000F8800000
 FUNC_TABLE_CATEGORY = CategoryPath("/pixel_loader")
+FUNC_TABLE_ENTRY_TYPE = None
 PROLOGUE_PATTERNS = (
     (0xFD, 0x7B, 0x01, None),
     (0xFD, 0x7B, 0xB8, None),
@@ -129,13 +130,17 @@ def create_function_safe(address, name):
 
 
 def create_structs():
+    global FUNC_TABLE_ENTRY_TYPE
     manager = currentProgram.getDataTypeManager()
 
     func_entry = StructureDataType(FUNC_TABLE_CATEGORY, "func_table_entry", 0)
     func_entry.add(Pointer64DataType.dataType, 8, "func_pointer", None)
     func_entry.add(DWordDataType.dataType, 4, "func_size", None)
     func_entry.add(DWordDataType.dataType, 4, "name_offset", None)
-    manager.addDataType(func_entry, DataTypeConflictHandler.REPLACE_HANDLER)
+    FUNC_TABLE_ENTRY_TYPE = manager.addDataType(
+        func_entry,
+        DataTypeConflictHandler.REPLACE_HANDLER,
+    )
 
 
 def looks_like_pixel_abl():
@@ -222,6 +227,8 @@ def resolve_func_table(func_table_offset):
             continue
         if func_offset < BASE_ADDR or func_offset >= BASE_ADDR + FILE_SIZE:
             continue
+        if address_table_end + string_offset >= FILE_SIZE:
+            continue
 
         func_name = read_c_string(address_table_end + string_offset)
         if not func_name:
@@ -229,6 +236,11 @@ def resolve_func_table(func_table_offset):
 
         safe_name = sanitize_name(func_name, func_offset)
         entry_addr = toAddr(BASE_ADDR + entry_offset)
+        if FUNC_TABLE_ENTRY_TYPE is not None:
+            try:
+                createData(entry_addr, FUNC_TABLE_ENTRY_TYPE)
+            except:
+                pass
         create_label_safe(entry_addr, "func_table_entry_%04d" % entry_index)
         if create_function_safe(toAddr(func_offset), safe_name):
             resolved += 1
@@ -297,14 +309,19 @@ def ensure_image_base():
 
 
 def main():
-    if not looks_like_pixel_abl():
+    signature_matches = looks_like_pixel_abl()
+    if not signature_matches:
         log("warning: the current binary does not match the expected Pixel ABL signature")
-        return
 
     ensure_image_base()
-    create_structs()
+    if signature_matches:
+        create_structs()
 
-    func_table_offset, end_of_code = find_func_table()
+    func_table_offset = None
+    end_of_code = None
+    if signature_matches:
+        func_table_offset, end_of_code = find_func_table()
+
     if func_table_offset is not None:
         log("function table at 0x%X" % (BASE_ADDR + func_table_offset))
         create_label_safe(toAddr(end_of_code), "pixel_code_end")
