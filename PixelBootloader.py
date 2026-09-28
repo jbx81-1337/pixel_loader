@@ -84,16 +84,6 @@ def read_le(offset, size):
     return value
 
 
-def read_be(offset, size):
-    data = get_bytes(offset, size)
-    if data is None:
-        return None
-    value = 0
-    for index in range(size):
-        value = (value << 8) | byte_value(data[index])
-    return value
-
-
 def sanitize_name(name, fallback_offset):
     cleaned = re.sub(r"[^0-9A-Za-z_]", "_", name or "")
     cleaned = cleaned.strip("_")
@@ -174,8 +164,7 @@ def find_func_table():
         monitor.checkCancelled()
 
         entry_value_le = read_le(offset, 8)
-        entry_value_be = read_be(offset, 8)
-        if entry_value_le != BASE_ADDR and entry_value_be != BASE_ADDR:
+        if entry_value_le != BASE_ADDR:
             continue
 
         table_size = read_le(offset - 0xC, 4)
@@ -314,7 +303,6 @@ def main():
     if func_table_offset is not None:
         log("function table at 0x%X" % (BASE_ADDR + func_table_offset))
         create_label_safe(toAddr(end_of_code), "pixel_code_end")
-        create_label_safe(toAddr(end_of_code), "pixel_data_start")
         resolved = resolve_func_table(func_table_offset)
         log("resolved %d functions from the function table" % resolved)
         return
