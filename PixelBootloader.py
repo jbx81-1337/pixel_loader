@@ -307,6 +307,8 @@ def main():
         create_label_safe(toAddr(end_of_code), "pixel_code_end")
         resolved = resolve_func_table(func_table_offset)
         log("resolved %d functions from the function table" % resolved)
+        created = find_code_by_prologue(0, end_of_code - BASE_ADDR)
+        log("identified %d additional function entry points by prologue scan" % created)
         return
 
     log("function table not found; falling back to code boundary and prologue detection")

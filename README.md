@@ -37,7 +37,7 @@ The script will:
   * Rebase the program to the Pixel ABL runtime base address.
   * Locate and label the function table when present.
   * Create and name functions from the loader metadata.
-  * Fall back to prologue scanning when the function table is missing.
+  * Supplement table-based recovery with prologue scanning, or fall back entirely to prologue scanning when the table is missing.
 
 ### Notes
 
