@@ -29,12 +29,12 @@ You can also use any personal script directory configured in Ghidra's Script Man
    ```
 
 2. Import the extracted `abl` binary into Ghidra as a raw binary.
-3. Select the AArch64 little-endian language during import.
+3. Select the AArch64 little-endian language during import and set the image base to `0xFFFF0000F8800000`.
 4. Run `PixelBootloader.py` from Ghidra's Script Manager.
 
 The script will:
 
-  * Rebase the program to the Pixel ABL runtime base address.
+  * Validate that the program was imported at the Pixel ABL runtime base address.
   * Locate and label the function table when present.
   * Create and name functions from the loader metadata.
   * Supplement table-based recovery with prologue scanning, or fall back entirely to prologue scanning when the table is missing.

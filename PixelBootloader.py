@@ -227,10 +227,11 @@ def resolve_func_table(func_table_offset):
             continue
         if func_offset < BASE_ADDR or func_offset >= BASE_ADDR + FILE_SIZE:
             continue
-        if address_table_end + string_offset >= FILE_SIZE:
+        name_offset = address_table_end + string_offset
+        if name_offset < 0 or name_offset >= FILE_SIZE:
             continue
 
-        func_name = read_c_string(address_table_end + string_offset)
+        func_name = read_c_string(name_offset)
         if not func_name:
             func_name = "sub_%X" % func_offset
 
@@ -300,12 +301,8 @@ def find_code_by_prologue(start_offset, end_offset):
     return found
 
 
-def ensure_image_base():
-    if currentProgram.getImageBase().getOffset() == BASE_ADDR:
-        return
-
-    log("Rebasing program to 0x%X" % BASE_ADDR)
-    currentProgram.setImageBase(toAddr(BASE_ADDR), True)
+def has_expected_image_base():
+    return currentProgram.getImageBase().getOffset() == BASE_ADDR
 
 
 def main():
@@ -313,7 +310,10 @@ def main():
     if not signature_matches:
         log("warning: the current binary does not match the expected Pixel ABL signature")
 
-    ensure_image_base()
+    if not has_expected_image_base():
+        log("please import the binary with image base 0x%X and rerun the script" % BASE_ADDR)
+        return
+
     if signature_matches:
         create_structs()
 
